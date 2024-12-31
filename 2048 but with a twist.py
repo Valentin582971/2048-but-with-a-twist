@@ -3,7 +3,6 @@ import sys
 import random
 import time
 import math
-from concurrent.futures import ThreadPoolExecutor
 
 # Constants
 SCREEN_SIZE = 1000
@@ -34,13 +33,13 @@ GRID_SIZE = 4
 TILE_SIZE = SCREEN_SIZE // GRID_SIZE
 FONT_SIZE = max(20, TILE_SIZE // 4)
 next_upgrade = 2048
-use_ai = True  # Set to False to play manually
-num_threads = 8  # Number of threads for MCTS
+STEPS = 3  # Number of steps ahead for AI to simulate
+use_ai = True
 
 # Initialize pygame
 pygame.init()
 screen = pygame.display.set_mode((SCREEN_SIZE, SCREEN_SIZE))
-pygame.display.set_caption("2048 but with a twist")
+pygame.display.set_caption("2048 but with a Twist")
 font = pygame.font.Font(None, FONT_SIZE)
 
 def create_grid():
@@ -140,103 +139,103 @@ def check_and_expand(grid):
                 return expand_grid(grid)
     return grid
 
+def evaluate_grid(grid):
+    """
+    Évalue une grille en prenant en compte :
+    - le nombre de cases vides,
+    - la plus grande valeur,
+    - le regroupement des nombres identiques (ou proches).
+    """
+    # Pondérations
+    empty_cell_weight = 5000
+    max_tile_weight = 10
+    grouping_weight = 200
+
+    # Nombre de cases vides
+    empty_cells = sum(1 for row in grid for cell in row if cell == 0)
+
+    # Plus grande valeur
+    max_tile = max(max(row) for row in grid)
+
+    # Regroupement des nombres proches (fusion possible)
+    def calculate_grouping_score(grid):
+        score = 0
+        for r in range(len(grid)):
+            for c in range(len(grid[0])):
+                if grid[r][c] == 0:
+                    continue
+                # Vérifie les voisins (droite et bas uniquement pour éviter les doublons)
+                if c + 1 < len(grid) and abs(grid[r][c] - grid[r][c + 1]) <= grid[r][c] // 2:
+                    score += 1
+                if r + 1 < len(grid) and abs(grid[r][c] - grid[r + 1][c]) <= grid[r][c] // 2:
+                    score += 1
+        return score
+
+    grouping_score = calculate_grouping_score(grid)
+
+    # Évaluation finale
+    score = (empty_cells * empty_cell_weight +
+             max_tile * max_tile_weight +
+             grouping_score * grouping_weight)
+
+    return score
+
+
+
+def simulate_move(grid, move_func):
+    new_grid = move_func(grid)
+    if new_grid != grid:
+        add_new_tile(new_grid)
+    return new_grid
+
+def ai_play(grid, steps):
+    moves = [move_left, move_right, move_up, move_down]
+    best_move = None
+    best_score = -float('inf')
+
+    for move_func in moves:
+        simulation_grid = simulate_move(grid, move_func)
+        if simulation_grid == grid:
+            continue
+
+        score = simulate_future(simulation_grid, steps - 1)
+        if score > best_score:
+            best_score = score
+            best_move = move_func
+
+    return best_move
+
+def simulate_future(grid, steps):
+    if steps == 0 or is_game_over(grid):
+        return evaluate_grid(grid)
+
+    moves = [move_left, move_right, move_up, move_down]
+    scores = []
+    for move_func in moves:
+        simulation_grid = simulate_move(grid, move_func)
+        if simulation_grid != grid:
+            scores.append(simulate_future(simulation_grid, steps - 1))
+
+    return max(scores) if scores else evaluate_grid(grid)
+
 def display_game_over(score):
     screen.fill(BACKGROUND_COLOR)
     text = font.render(f"Game Over! Score: {score}", True, TEXT_COLOR)
     text_rect = text.get_rect(center=(SCREEN_SIZE // 2, SCREEN_SIZE // 2))
     screen.blit(text, text_rect)
     pygame.display.flip()
-    wait_for_key(pygame.K_RETURN)
-
-def wait_for_key(key):
-    while True:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-            elif event.type == pygame.KEYDOWN and event.key == key:
-                return
-
-class MCTSNode:
-    def __init__(self, grid, parent=None, move=None):
-        self.grid = grid
-        self.parent = parent
-        self.move = move
-        self.children = []
-        self.visits = 0
-        self.total_score = 0
-
-    def expand(self):
-        moves = [(move_left, "left"), (move_right, "right"), (move_up, "up"), (move_down, "down")]
-        for move_func, move_name in moves:
-            new_grid = move_func(self.grid)
-            if new_grid != self.grid:
-                child_node = MCTSNode(new_grid, parent=self, move=move_func)
-                self.children.append(child_node)
-
-    def is_fully_expanded(self):
-        return len(self.children) > 0
-
-    def best_child(self, exploration_weight=1.4):
-        return max(
-            self.children,
-            key=lambda child: child.total_score / (child.visits + 1) + exploration_weight * math.sqrt(math.log(self.visits + 1) / (child.visits + 1))
-        )
-
-def mcts_worker(root, iterations):
-    for _ in range(iterations):
-        node = root
-        # Selection
-        while node.is_fully_expanded() and node.children:
-            node = node.best_child()
-        # Expansion
-        if not node.is_fully_expanded():
-            node.expand()
-            if node.children:
-                node = random.choice(node.children)
-        # Simulation
-        score = simulate(node.grid)
-        # Backpropagation
-        while node is not None:
-            node.visits += 1
-            node.total_score += score
-            node = node.parent
-
-def mcts(root, iterations=1000):
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = [executor.submit(mcts_worker, root, iterations // num_threads) for _ in range(num_threads)]
-        for future in futures:
-            future.result()
-
-    return root.best_child(exploration_weight=0).move
-
-def simulate(grid):
-    simulation_grid = [row[:] for row in grid]
-    while not is_game_over(simulation_grid):
-        moves = [move_left, move_right, move_up, move_down]
-        random_move = random.choice(moves)
-        new_grid = random_move(simulation_grid)
-        if new_grid != simulation_grid:
-            add_new_tile(new_grid)
-            simulation_grid = new_grid
-    return calculate_score(simulation_grid)
-
-def ai_move(grid):
-    root = MCTSNode(grid)
-    root.expand()
-    best_move = mcts(root)
-    return best_move
+    pygame.time.wait(3000)
 
 def main():
     global use_ai
     grid = create_grid()
     clock = pygame.time.Clock()
+
     while True:
         if use_ai:
-            best_move = ai_move(grid)
+            best_move = ai_play(grid, STEPS)
             if best_move:
-                grid = best_move(grid)
-                add_new_tile(grid)
+                grid = simulate_move(grid, best_move)
                 grid = check_and_expand(grid)
             if is_game_over(grid):
                 display_game_over(calculate_score(grid))
@@ -248,21 +247,21 @@ def main():
                     sys.exit()
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_LEFT:
-                        grid = move_left(grid)
+                        grid = simulate_move(grid, move_left)
                     elif event.key == pygame.K_RIGHT:
-                        grid = move_right(grid)
+                        grid = simulate_move(grid, move_right)
                     elif event.key == pygame.K_UP:
-                        grid = move_up(grid)
+                        grid = simulate_move(grid, move_up)
                     elif event.key == pygame.K_DOWN:
-                        grid = move_down(grid)
-                    add_new_tile(grid)
+                        grid = simulate_move(grid, move_down)
                     grid = check_and_expand(grid)
                     if is_game_over(grid):
                         display_game_over(calculate_score(grid))
                         return
+
         draw_grid(grid)
         pygame.display.flip()
-        clock.tick(60)
+        clock.tick(0)
 
 if __name__ == "__main__":
     main()
